@@ -7,6 +7,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/drivers/i2c.h>
+#include <zephyr/shell/shell.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(imx219, LOG_LEVEL_DBG);
 
@@ -569,3 +570,32 @@ void sensor_set_test_pattern(uint8_t test_pattern)
 	selected_img_mode->test_pattern = test_pattern;
 	sensor_i2c_write(REG_TEST_PATTERN_LSB, test_pattern);
 }
+
+static int cmd_imx219_scan(const struct shell *sh, size_t argc, char **argv)
+{
+	SensorI2cBusTest();
+	return 0;
+}
+
+static int cmd_imx219_init(const struct shell *sh, size_t argc, char **argv)
+{
+	SensorInit();
+	return 0;
+}
+
+static int cmd_imx219_testpattern(const struct shell *sh, size_t argc, char **argv)
+{
+	sensor_set_test_pattern(1);
+	return 0;
+}
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_imx219,
+                               SHELL_CMD(scan, NULL, "Read the sensor ID over I2C",
+                                         &cmd_imx219_scan),
+                               SHELL_CMD(init, NULL, "Send the startup config sequence over I2C again",
+                                         &cmd_imx219_init),
+                               SHELL_CMD(testpattern, NULL, "Send the config sequence to setup the test pattern",
+                                         &cmd_imx219_testpattern),
+                               SHELL_SUBCMD_SET_END);
+
+SHELL_CMD_REGISTER(imx219, &sub_imx219, "IMX219 sensor test commands", NULL);
