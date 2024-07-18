@@ -1,19 +1,201 @@
-#include "imx219.h"
+/*
+ * Copyright (c) 2022 CircuitValley
+ * Copyright (c) 2023-2024 tinyVision.ai Inc.
+ * SPDX-License-Identifier: CC-BY-4.0
+ */
 
-#include "system.h"
-#include <libbase/uart.h>
-#include <libbase/console.h>
-#include <libbase/i2c.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/logging/log.h>
+LOG_MODULE_REGISTER(imx219, LOG_LEVEL_DBG);
+
+// For now, only support 2 lanes
+#define LANES 2
+
+#define IMX219_I2C_ADDR  0x10
+#define IMX219_SENSOR_ID 0x0219
+
+#define CAMERA_ID IMX219_SENSOR_ID
+
+#define REG_SW_RESET      0x0103
+#define REG_MODEL_ID_MSB  0x0000
+#define REG_MODEL_ID_LSB  0x0001
+#define REG_MODE_SEL      0x0100
+#define REG_CSI_LANE      0x0114
+#define REG_DPHY_CTRL     0x0128
+#define REG_EXCK_FREQ_MSB 0x012A
+#define REG_EXCK_FREQ_LSB 0x012B
+#define REG_FRAME_LEN_MSB 0x0160
+#define REG_FRAME_LEN_LSB 0x0161
+#define REG_LINE_LEN_MSB  0x0162
+#define REG_LINE_LEN_LSB  0x0163
+#define REG_X_ADD_STA_MSB 0x0164
+#define REG_X_ADD_STA_LSB 0x0165
+#define REG_X_ADD_END_MSB 0x0166
+#define REG_X_ADD_END_LSB 0x0167
+#define REG_Y_ADD_STA_MSB 0x0168
+#define REG_Y_ADD_STA_LSB 0x0169
+#define REG_Y_ADD_END_MSB 0x016A
+#define REG_Y_ADD_END_LSB 0x016B
+
+#define REG_X_OUT_SIZE_MSB 0x016C
+#define REG_X_OUT_SIZE_LSB 0x016D
+#define REG_Y_OUT_SIZE_MSB 0x016E
+#define REG_Y_OUT_SIZE_LSB 0x016F
+
+#define REG_X_ODD_INC      0x0170
+#define REG_Y_ODD_INC      0x0171
+#define REG_IMG_ORIENT     0x0172
+#define REG_BINNING_H      0x0174
+#define REG_BINNING_V      0x0175
+#define REG_BIN_CALC_MOD_H 0x0176
+#define REG_BIN_CALC_MOD_V 0x0177
+
+#define REG_CSI_FORMAT_C 0x018C
+#define REG_CSI_FORMAT_D 0x018D
+
+#define REG_DIG_GAIN_GLOBAL_MSB  0x0158
+#define REG_DIG_GAIN_GLOBAL_LSB  0x0159
+#define REG_ANA_GAIN_GLOBAL      0x0157
+#define REG_INTEGRATION_TIME_MSB 0x015A
+#define REG_INTEGRATION_TIME_LSB 0x015B
+#define REG_ANALOG_GAIN          0x0157
+
+#define REG_VTPXCK_DIV      0x0301
+#define REG_VTSYCK_DIV      0x0303
+#define REG_PREPLLCK_VT_DIV 0x0304
+#define REG_PREPLLCK_OP_DIV 0x0305
+#define REG_PLL_VT_MPY_MSB  0x0306
+#define REG_PLL_VT_MPY_LSB  0x0307
+#define REG_OPPXCK_DIV      0x0309
+#define REG_OPSYCK_DIV      0x030B
+#define REG_PLL_OP_MPY_MSB  0x030C
+#define REG_PLL_OP_MPY_LSB  0x030D
+
+#define REG_TEST_PATTERN_MSB 0x0600
+#define REG_TEST_PATTERN_LSB 0x0601
+#define REG_TP_RED_MSB       0x0602
+#define REG_TP_RED_LSB       0x0603
+#define REG_TP_GREEN_MSB     0x0604
+#define REG_TP_GREEN_LSB     0x0605
+#define REG_TP_BLUE_MSB      0x0606
+#define REG_TP_BLUE_LSB      0x0607
+#define REG_TP_X_OFFSET_MSB  0x0620
+#define REG_TP_X_OFFSET_LSB  0x0621
+#define REG_TP_Y_OFFSET_MSB  0x0622
+#define REG_TP_Y_OFFSET_LSB  0x0623
+#define REG_TP_WIDTH_MSB     0x0624
+#define REG_TP_WIDTH_LSB     0x0625
+#define REG_TP_HEIGHT_MSB    0x0626
+#define REG_TP_HEIGHT_LSB    0x0627
+
+typedef enum {
+	IMGSENSOR_MODE_INIT,
+	IMGSENSOR_MODE_PREVIEW,
+	IMGSENSOR_MODE_CAPTURE,
+	IMGSENSOR_MODE_VIDEO,
+	IMGSENSOR_MODE_HIGH_SPEED_VIDEO,
+	IMGSENSOR_MODE_SLIM_VIDEO,
+} IMGSENSOR_MODE;
+
+enum {
+	IMAGE_NORMAL = 0,
+	IMAGE_H_MIRROR,
+	IMAGE_V_MIRROR,
+	IMAGE_HV_MIRROR
+};
+
+typedef struct imgsensor_mode_struct_s {
+	uint16_t pix_clk_mul;
+	uint16_t pix_clk_div;
+	uint8_t mirror;
+	uint16_t integration;
+	uint16_t gain;
+	uint16_t gain_max;
+
+	uint16_t linelength;
+	uint16_t framelength;
+	uint16_t startx;
+	uint16_t starty;
+	uint16_t endx;
+	uint16_t endy;
+
+	uint16_t width;
+	uint16_t height;
+	uint16_t framerate;
+	uint8_t binning;
+	uint16_t fps;
+	uint8_t test_pattern;
+} imgsensor_mode_t;
+
+typedef struct imx219_reg_s {
+	uint16_t address;
+	uint8_t val;
+} imx219_reg_t;
+
+#if LANES == 2
+#define SENSOR_MODE0_WIDTH  (unsigned int)640
+#define SENSOR_MODE0_HEIGHT (unsigned int)78
+#define SENSOR_MODE0_FPS    (unsigned int)1000
+
+#define SENSOR_MODE1_WIDTH  (unsigned int)640
+#define SENSOR_MODE1_HEIGHT (unsigned int)480
+#define SENSOR_MODE1_FPS    (unsigned int)200
+
+#define SENSOR_MODE2_WIDTH  (unsigned int)1280
+#define SENSOR_MODE2_HEIGHT (unsigned int)720
+#define SENSOR_MODE2_FPS    (unsigned int)60
+
+#define SENSOR_MODE3_WIDTH  (unsigned int)1920
+#define SENSOR_MODE3_HEIGHT (unsigned int)1080
+#define SENSOR_MODE3_FPS    (unsigned int)30
+
+#define SENSOR_MODE4_WIDTH   (unsigned int)3280
+#define SENSOR_MODE4_HEIGHT  (unsigned int)2464
+#define SENSOR_MODE4_FPS_MIN (unsigned int)5
+#define SENSOR_MODE4_FPS     (unsigned int)15
+
+#else
+#define SENSOR_MODE0_WIDTH  (unsigned int)640
+#define SENSOR_MODE0_HEIGHT (unsigned int)78
+#define SENSOR_MODE0_FPS    (unsigned int)2000
+
+#define SENSOR_MODE1_WIDTH  (unsigned int)640
+#define SENSOR_MODE1_HEIGHT (unsigned int)480
+#define SENSOR_MODE1_FPS    (unsigned int)400
+
+#define SENSOR_MODE2_WIDTH  (unsigned int)1280
+#define SENSOR_MODE2_HEIGHT (unsigned int)720
+#define SENSOR_MODE2_FPS    (unsigned int)120
+
+#define SENSOR_MODE3_WIDTH  (unsigned int)1920
+#define SENSOR_MODE3_HEIGHT (unsigned int)1080
+#define SENSOR_MODE3_FPS    (unsigned int)60
+
+#define SENSOR_MODE4_WIDTH   (unsigned int)3280
+#define SENSOR_MODE4_HEIGHT  (unsigned int)2464
+#define SENSOR_MODE4_FPS_MIN (unsigned int)10
+#define SENSOR_MODE4_FPS     (unsigned int)30
+
+#endif
+
+#define I2C0 DEVICE_DT_GET(DT_NODELABEL(i2c0))
+
+#define GET_WORD_MSB(x)  ((x >> 8) & 0xFF)
+#define GET_WORD_LSB(x)  (       x & 0xFF)
 
 static bool sensor_i2c_write(uint16_t addr, uint8_t data)
 {
-	uint8_t val = data;
-	return i2c_write(IMX219_I2C_ADDR, addr, &val, 1, 2);
+	uint8_t msg[] = { addr & 0xff, addr & 0xff, data };
+
+	return i2c_write(I2C0, msg, sizeof(msg), IMX219_I2C_ADDR) == 0;
 }
 
 static bool sensor_i2c_read(uint16_t addr, uint8_t *data)
 {
-	return i2c_read(IMX219_I2C_ADDR, addr, data, 1, true, 2);
+	addr = sys_cpu_to_be16(addr);
+	return i2c_write_read(I2C0, IMX219_I2C_ADDR, &addr, sizeof(addr), &data, sizeof(data)) == 0;
 }
 
 imgsensor_mode_t *selected_img_mode;
@@ -236,10 +418,10 @@ void SensorReset(void)
 {
 	sensor_i2c_write(REG_SW_RESET, 0x01);
 	/* Wait for some time to allow proper reset. */
-	busy_wait_us(10);
+	k_sleep(K_USEC(10));
 	/* Delay the allow the sensor to power up. */
 	sensor_i2c_write(REG_SW_RESET, 0x00);
-	busy_wait_us(100);
+	k_sleep(K_USEC(100));
 	return;
 }
 
@@ -301,35 +483,32 @@ uint8_t SensorI2cBusTest(void)
 {
 	uint8_t model_lsb;
 	uint8_t model_msb;
-	// bool i2c_read(unsigned char slave_addr, unsigned int addr, unsigned char *data, unsigned
-	// int len, bool send_stop, unsigned int addr_size)
 
 	sensor_i2c_read(REG_MODEL_ID_MSB, &model_msb);
 	sensor_i2c_read(REG_MODEL_ID_LSB, &model_lsb);
 
 	if (((((uint16_t)model_msb & 0x0F) << 8) | model_lsb) == CAMERA_ID) {
-		printf("I2C Sensor id: 0x%x\n", (((uint16_t)model_msb & 0x0F) << 8) | model_lsb);
-		return RET_SUCCESS;
+		LOG_INF("I2C Sensor id: 0x%x", (((uint16_t)model_msb & 0x0F) << 8) | model_lsb);
+		return 0;
 	}
 
-	return RET_CAM_NOT_FOUND;
+	return -ENODEV;
 }
 
 uint8_t SensorInit(void)
 {
-
-	if (SensorI2cBusTest() != RET_SUCCESS) /* Verify that the sensor is connected. */
+	if (SensorI2cBusTest() != 0) /* Verify that the sensor is connected. */
 	{
-		printf("Error: Reading Sensor ID failed!\r\n");
-		return RET_CAM_NOT_FOUND;
+		LOG_ERR("Error: Reading Sensor ID failed!");
+		return -ENODEV;
 	}
 
-	for (uint16_t i = 0; i < _countof(mode_default); i++) {
+	for (uint16_t i = 0; i < (sizeof(mode_default) / sizeof(mode_default[0])); i++) {
 		sensor_i2c_write((mode_default + i)->address, (mode_default + i)->val);
 	}
 	sensor_config = sensor_config_2LANE;
 	sensor_configure_mode(&sensor_config_2LANE[2]);
-	return RET_SUCCESS;
+	return 0;
 }
 
 uint8_t SensorGetBrightness(void)
