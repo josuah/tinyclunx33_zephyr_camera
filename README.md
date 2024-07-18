@@ -21,13 +21,13 @@ vlc v4l2:///dev/video0
 ffplay /dev/video0
 
 # Or record it using https://ffmpeg.org/
-ffmpeg -i /dev/video0 tinyclunx33_capture.mp4
+ffmpeg -i /dev/video0 video0.mp4
 
 # Or record it using https://guvcview.sourceforge.net/
 guvcview --device=/dev/video0
 
 # Or record the raw data using V4L2 utilities
-v4l2-ctl --device /dev/video0 --stream-mmap --stream-count=500 --stream-to=tinyclunx33_capture.bin
+v4l2-ctl --device /dev/video0 --stream-mmap --stream-count=500 --stream-to=video0.bin
 
 # Or play it using https://opencv.org/
 import cv2
