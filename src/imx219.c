@@ -188,15 +188,29 @@ typedef struct imx219_reg_s {
 
 static bool sensor_i2c_write(uint16_t addr, uint8_t data)
 {
-	uint8_t msg[] = { addr & 0xff, addr & 0xff, data };
+	uint8_t buf[] = { addr >> 8, addr & 0xff, data };
+	int ret;
 
-	return i2c_write(I2C0, msg, sizeof(msg), IMX219_I2C_ADDR) == 0;
+	ret = i2c_write(I2C0, buf, sizeof(buf), IMX219_I2C_ADDR);
+	if (ret != 0) {
+		LOG_ERR("imx219@%x: failed to write 0x%02x to register 0x%04x",
+			IMX219_I2C_ADDR, data, addr);
+	}
+	return ret == 0;
 }
 
 static bool sensor_i2c_read(uint16_t addr, uint8_t *data)
 {
-	addr = sys_cpu_to_be16(addr);
-	return i2c_write_read(I2C0, IMX219_I2C_ADDR, &addr, sizeof(addr), &data, sizeof(data)) == 0;
+	uint8_t buf[2];
+	int ret;
+
+	sys_put_be16(addr, buf);
+	ret = i2c_write_read(I2C0, IMX219_I2C_ADDR, buf, sizeof(buf), data, sizeof(*data));
+	if (ret != 0) {
+		LOG_ERR("imx219@%x: failed to read from register 0x%04x",
+			IMX219_I2C_ADDR, addr);
+	}
+	return ret == 0;
 }
 
 imgsensor_mode_t *selected_img_mode;
@@ -482,14 +496,15 @@ static void sensor_configure_mode(imgsensor_mode_t *mode)
 
 uint8_t SensorI2cBusTest(void)
 {
-	uint8_t model_lsb;
-	uint8_t model_msb;
+	uint8_t model_lsb = 0;
+	uint8_t model_msb = 0;
 
 	sensor_i2c_read(REG_MODEL_ID_MSB, &model_msb);
 	sensor_i2c_read(REG_MODEL_ID_LSB, &model_lsb);
 
+	LOG_INF("I2C Sensor id: 0x%02x%02x", model_msb, model_lsb);
+
 	if (((((uint16_t)model_msb & 0x0F) << 8) | model_lsb) == CAMERA_ID) {
-		LOG_INF("I2C Sensor id: 0x%x", (((uint16_t)model_msb & 0x0F) << 8) | model_lsb);
 		return 0;
 	}
 
@@ -571,12 +586,6 @@ void sensor_set_test_pattern(uint8_t test_pattern)
 	sensor_i2c_write(REG_TEST_PATTERN_LSB, test_pattern);
 }
 
-static int cmd_imx219_scan(const struct shell *sh, size_t argc, char **argv)
-{
-	SensorI2cBusTest();
-	return 0;
-}
-
 static int cmd_imx219_init(const struct shell *sh, size_t argc, char **argv)
 {
 	SensorInit();
@@ -590,8 +599,6 @@ static int cmd_imx219_testpattern(const struct shell *sh, size_t argc, char **ar
 }
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_imx219,
-                               SHELL_CMD(scan, NULL, "Read the sensor ID over I2C",
-                                         &cmd_imx219_scan),
                                SHELL_CMD(init, NULL, "Send the startup config sequence over I2C again",
                                          &cmd_imx219_init),
                                SHELL_CMD(testpattern, NULL, "Send the config sequence to setup the test pattern",
